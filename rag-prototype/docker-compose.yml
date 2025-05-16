@@ -36,6 +36,8 @@ services:
       - ./data:/app/data
       - ./prompts:/app/prompts
     environment:
+      - LLM_PROVIDER=ollama
+      - OPENAI_API_KEY=<provide the openai api key here>
       - OLLAMA_BASE_URL=http://ollama:11434
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333

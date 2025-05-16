@@ -14,8 +14,7 @@ fastapi = "^0.110.0"
 uvicorn = { extras = ["standard"], version = "^0.29.0" }
 
 # LLM integráció és prompt augmentáció
-langchain = "^0.1.16"
-langchain-community = "^0.0.35"
+langchain-community = "^0.3.24"
 ollama = "^0.1.6"
 
 # Redis
@@ -30,6 +29,9 @@ python-dotenv = "^1.0.1"
 pydantic = "^2.6.4"
 aiohttp = "^3.9.5"
 pypdf = "^3.15.1"
+openai = "^1.78.1"
+langchain-core = "^0.3.59"
+langchain-openai = "^0.3.17"
 
 
 [build-system]

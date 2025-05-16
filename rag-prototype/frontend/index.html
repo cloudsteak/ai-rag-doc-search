@@ -2,11 +2,24 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <title>AI RAG Search</title>
+    <title>Johnny the iguana</title>
     <style>
+      #logo{
+        top: 55px;
+        position: absolute;
+        left: 44px;
+      }
+
+      #loadingSpinner{
+          display:none;
+          position:absolute;
+          top: 30vh;
+          margin-left: 40vw;
+      } 
+
       body {
         font-family: sans-serif;
-        max-width: 850px;
+        max-width: 85vw;
         margin: 2rem auto;
         padding: 1rem;
       }
@@ -38,13 +51,28 @@
         border: none;
         background-color: #a2d3fe;
       }
+
+      button:hover{
+        background-color: black;
+        color: #a2d3fe;
+      }
     </style>
+    <link
+  rel="stylesheet"
+  href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css"
+  crossorigin="anonymous"
+/>
+
+
+
   </head>
   <body>
-    <h1>AI RAG Search</h1>
+    <h1>Johnny the iguana</h1>
+    <img id="logo" src="assets/johnny-04-tr.png" alt="johnny-logo" width="120px" />
     <p>
-      This is a simple AI-powered search interface. Ask your question and get
-      the answer in real-time.
+      Johhny is a simple Generative AI-powered search interface. Ask your question and get
+      the answer in real-time from Johnny.
+    </p>
 
     <textarea
       id="chatLog"
@@ -77,77 +105,86 @@
       <button type="button" onclick="loadDocuments()" >Load documents</button>
       <button type="button" onclick="resetVectorStore()" >Reset Vector store</button>
 
-
+    </div>
+    <div id="loadingSpinner">
+    <i class="fas fa-spinner fa-pulse fa-2x"></i>
+    </div>
     <script>
-      const form = document.getElementById("chatForm");
-      const input = document.getElementById("questionInput");
-      const log = document.getElementById("chatLog");
+     const form = document.getElementById("chatForm");
+const input = document.getElementById("questionInput");
+const log = document.getElementById("chatLog");
 
-      const session_id = "frontend-" + Math.random().toString(36).substring(2);
-      let isFirstQuestion = true;
+const session_id = "frontend-" + Math.random().toString(36).substring(2);
+let isFirstQuestion = true;
 
-      form.addEventListener("submit", async (e) => {
-        e.preventDefault();
-        const question = input.value.trim();
-        if (!question) return;
+form.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const question = input.value.trim();
+  if (!question) return;
 
-        log.value += `\nYou: ${question}\n`;
-        input.value = "";
+  document.getElementById("loadingSpinner").style.display = "block"; // Show spinner
 
-        const endpoint = isFirstQuestion ? "/init-question" : "/conversation";
-        isFirstQuestion = false;
+  log.value += `\nYou: ${question}\n`;
+  input.value = "";
 
-        const response = await fetch(`http://localhost:8900${endpoint}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ session_id, question }),
-        });
+  const endpoint = isFirstQuestion ? "/init-question" : "/conversation";
+  isFirstQuestion = false;
 
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let currentAnswer = "AI: ";
-        log.value += currentAnswer;
+  const response = await fetch(`http://localhost:8900${endpoint}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id, question }),
+  });
 
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let currentAnswer = "AI: ";
+  log.value += currentAnswer;
 
-          const chunk = decoder.decode(value, { stream: true });
-          currentAnswer += chunk;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
 
-          // Frissítjük az utolsó sorban az AI válaszát
-          const lines = log.value.split("\n");
-          lines[lines.length - 1] = currentAnswer;
-          log.value = lines.join("\n");
-          log.scrollTop = log.scrollHeight;
-        }
-      });
+    const chunk = decoder.decode(value, { stream: true });
+    currentAnswer += chunk;
 
-      async function clearChat() {
-        const response = await fetch(`http://localhost:8900/new-conversation`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ session_id }),
-        });
-        document.getElementById("chatLog").value = "";
-        document.getElementById("questionInput").value = "";
-      }
+    const lines = log.value.split("\n");
+    lines[lines.length - 1] = currentAnswer;
+    log.value = lines.join("\n");
+    log.scrollTop = log.scrollHeight;
+  }
 
-      async function loadDocuments() {
-        const response = await fetch(`http://localhost:8900/load-documents`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ session_id }),
-        });
-      }
+  document.getElementById("loadingSpinner").style.display = "none"; // Hide spinner
 
-        async function resetVectorStore() {
-            const response = await fetch(`http://localhost:8900/reset-vector-store`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ session_id }),
-            });
-        }
+  
+});
+
+async function clearChat() {
+  const response = await fetch(`http://localhost:8900/new-conversation`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id }),
+  });
+  document.getElementById("chatLog").value = "";
+  document.getElementById("questionInput").value = "";
+}
+
+async function loadDocuments() {
+  const response = await fetch(`http://localhost:8900/load-documents`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id }),
+  });
+}
+
+async function resetVectorStore() {
+  const response = await fetch(`http://localhost:8900/reset-vector-store`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id }),
+  });
+}
+
 
 
     </script>

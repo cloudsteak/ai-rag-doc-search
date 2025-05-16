@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.chat_models import ChatOllama
 from langchain.prompts import ChatPromptTemplate
 from langchain.schema.runnable import Runnable
@@ -29,12 +30,14 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+
 # Redis utils
 async def get_conversation(session_id: str) -> List[Dict[str, str]]:
     data = await redis_client.get(session_id)
     if data:
         return json.loads(data)
     return []
+
 
 async def save_conversation(session_id: str, history: List[Dict[str, str]]):
     await redis_client.set(session_id, json.dumps(history))
@@ -44,16 +47,26 @@ async def stream_answer(chain: Runnable, variables: dict):
     async for chunk in chain.astream(variables):
         yield chunk.content
 
+
 # Async generator to stream and collect the full response
-async def stream_and_store_answer(chain: Runnable, variables: dict, session_id: str, question: str):
+async def stream_and_store_answer(
+    chain: Runnable, variables: dict, session_id: str, question: str
+):
     full_answer = ""
 
     async for chunk in chain.astream(variables):
-        content = chunk  
-        full_answer += content
-        yield content
+        # Extract token content correctly
+        if hasattr(chunk, "data"):
+            content = chunk.data
+        elif isinstance(chunk, dict) and "content" in chunk:
+            content = chunk["content"]
+        else:
+            content = str(chunk)  # Fallback (optional, safety net)
 
-    # Save to Redis after the full response is streamed
+        full_answer += content
+        yield content  # ✅ Yield only the token delta
+
+    # After streaming completes, store in Redis
     try:
         history = [{"question": question, "answer": full_answer}]
         await save_conversation(session_id, history)
@@ -61,12 +74,10 @@ async def stream_and_store_answer(chain: Runnable, variables: dict, session_id: 
         logger.error(f"Failed to save conversation for session {session_id}: {e}")
 
 
+
 # Async generator to stream and save conversation response
 async def stream_and_store_conversation_answer(
-    chain: Runnable,
-    variables: dict,
-    session_id: str,
-    question: str
+    chain: Runnable, variables: dict, session_id: str, question: str
 ):
     full_answer = ""
     async for chunk in chain.astream(variables):
@@ -82,7 +93,9 @@ async def stream_and_store_conversation_answer(
         logger.error(f"Failed to save conversation for session {session_id}: {e}")
 
 
-async def stream_json_response(chain: Runnable, variables: dict, session_id: str, question: str):
+async def stream_json_response(
+    chain: Runnable, variables: dict, session_id: str, question: str
+):
     full_answer = ""
     yield '{"response":"'
 
@@ -118,22 +131,45 @@ app.add_middleware(
 )
 
 # Environment variables
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
 QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
-INIT_PROMPT_TEMPLATE = os.getenv("INIT_PROMPT_TEMPLATE", "./prompts/init_prompt_en.tmpl")
+INIT_PROMPT_TEMPLATE = os.getenv(
+    "INIT_PROMPT_TEMPLATE", "./prompts/init_prompt_en.tmpl"
+)
 PROMPT_TEMPLATE = os.getenv("PROMPT_TEMPLATE", "./prompts/prompt_en.tmpl")
 
 # Initialize Redis client
-redis_client = redis.Redis(host=os.getenv("REDIS_HOST", "localhost"), port=6379, decode_responses=True)
+redis_client = redis.Redis(
+    host=os.getenv("REDIS_HOST", "localhost"), port=6379, decode_responses=True
+)
 
-# Initialize LLM and embedding model
-llm = ChatOllama(
-    model="mistral", 
-    base_url=OLLAMA_BASE_URL,
-    streaming=True
+
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai").lower()
+
+if LLM_PROVIDER == "openai":
+    llm = ChatOpenAI(
+        model="gpt-4-turbo",
+        api_key=os.getenv("OPENAI_API_KEY"),
+        streaming=True,
+        temperature=0.7,
     )
-embedding = OllamaEmbeddings(model="mistral", base_url=OLLAMA_BASE_URL)
+    embedding = OpenAIEmbeddings(
+        model="text-embedding-3-small", api_key=os.getenv("OPENAI_API_KEY")
+    )
+elif LLM_PROVIDER == "ollama":
+    llm = ChatOllama(
+        model="tinyllama",
+        base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+        streaming=True,
+    )
+    embedding = OllamaEmbeddings(
+        model="nomic-embed-text",
+        base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+    )
+else:
+    raise ValueError(f"Unsupported LLM_PROVIDER: {LLM_PROVIDER}")
 
 # Prompt template
 base_prompt = ChatPromptTemplate.from_template(
@@ -142,22 +178,36 @@ base_prompt = ChatPromptTemplate.from_template(
 
 
 # Create Qdrant collection if it doesn't exist
-def create_qdrant_collection():
+def create_qdrant_collection(
+    collection_name="texts", vector_size=1536, distance_metric=Distance.COSINE
+):
     # Connect to Qdrant
     logger.info("Connecting to Qdrant...")
     client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
-    
+
     logger.info("Checking if collection exists...")
     # Create collection if it doesn't exist
-    if not client.collection_exists("texts"):
+    if not client.collection_exists(collection_name):
         logger.info("Creating collection...")
         client.create_collection(
-            collection_name="texts",
+            collection_name=collection_name,
             vectors_config=VectorParams(
-                size=4096,  # Size of the embedding vector
-                distance=Distance.COSINE,
+                size=vector_size,
+                distance=distance_metric,
             ),
         )
+
+
+def clean_context_chunks(chunks):
+    cleaned = []
+    for chunk in chunks:
+        # Remove duplicated prefixes from context chunks
+        chunk = chunk.replace("PREVIOUS CONVERSATION:", "")
+        chunk = chunk.replace("AI: PREVIOUSS CONVERSATION:", "")
+        chunk = chunk.replace("CONTEXT:", "")
+        cleaned.append(chunk.strip())
+    return "\n\n".join(cleaned)
+
 
 # Delete conversation from Redis
 async def delete_conversation(session_id: str):
@@ -166,15 +216,18 @@ async def delete_conversation(session_id: str):
 
 output_parser = StrOutputParser()
 
+
 # Question input model
 class QuestionInput(BaseModel):
     session_id: str
     question: str
 
+
 # Conversation input model
 class ConversationInput(BaseModel):
     session_id: str
     question: str
+
 
 # Input model for conversation history
 class SessionInput(BaseModel):
@@ -186,15 +239,16 @@ class SessionInput(BaseModel):
 ################################
 
 
-
 # Initialize question endpoint with streaming
 @app.post("/init-question")
 async def init_question(input: QuestionInput):
     session_id = input.session_id
+    logger.info(f"Delete memory for this session id: {session_id}")
+    await delete_conversation(input.session_id)
     question = input.question
     logger.debug(f"Received question: {question} for session: {session_id}")
 
-    create_qdrant_collection()
+    create_qdrant_collection(collection_name="texts", vector_size=768)
 
     client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
     vectorstore = Qdrant(
@@ -202,13 +256,17 @@ async def init_question(input: QuestionInput):
         collection_name="texts",
         embeddings=embedding,
     )
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 10})
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
     documents = retriever.get_relevant_documents(question)
 
-    logger.info(f"Retrieved {len(documents)} documents for session: {session_id} and question: '{question}'")
+    logger.info(
+        f"Retrieved {len(documents)} documents for session: {session_id} and question: '{question}'"
+    )
 
-    context = "\n\n".join(doc.page_content for doc in documents)
-    context = context[:4000]
+    
+    unique_contents = list(set(doc.page_content.strip() for doc in documents))
+    context_clean = clean_context_chunks(unique_contents)[:4000]
+    
 
     logger.info(f"Loading init prompt from {INIT_PROMPT_TEMPLATE}")
     with open(INIT_PROMPT_TEMPLATE, "r", encoding="utf-8") as f:
@@ -218,8 +276,13 @@ async def init_question(input: QuestionInput):
     chain: Runnable = conversation_prompt | llm | output_parser
 
     return StreamingResponse(
-        stream_and_store_answer(chain, {"context": context, "question": question}, session_id, question),
-        media_type="text/plain"
+        stream_and_store_answer(
+            chain,
+            {"context": context_clean, "question": question},
+            session_id,
+            question,
+        ),
+        media_type="text/plain",
     )
 
 
@@ -231,10 +294,11 @@ async def conversation(input: ConversationInput):
 
     # Load conversation history from Redis
     history = await get_conversation(session_id)
-    previous_turns = "\n".join([
-        f"Q: {turn['question']}\nA: {turn['answer']}"
-        for turn in history
-    ])
+    # Deduplicate question-answer pairs
+    unique_history = list({(turn['question'], turn['answer']) for turn in history})
+    previous_turns = "\n".join(
+        [f"Q: {q}\nA: {a}" for q, a in unique_history]
+    )
 
     # Qdrant retriever
     client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
@@ -243,12 +307,15 @@ async def conversation(input: ConversationInput):
         collection_name="texts",
         embeddings=embedding,
     )
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 10})
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
     documents = retriever.get_relevant_documents(question)
-    logger.debug(f"Retrieved {len(documents)} documents from Qdrant for question: '{question}'")
+    logger.debug(
+        f"Retrieved {len(documents)} documents from Qdrant for question: '{question}'"
+    )
 
-    context = "\n\n".join(doc.page_content for doc in documents)
-    context = context[:4000]
+    # Clean context chunks before joining
+    unique_contents = list(set(doc.page_content.strip() for doc in documents))
+    context_clean = clean_context_chunks(unique_contents)[:4000]
 
     logger.info(f"Loading conversation prompt from {PROMPT_TEMPLATE}")
     with open(PROMPT_TEMPLATE, "r", encoding="utf-8") as f:
@@ -260,11 +327,15 @@ async def conversation(input: ConversationInput):
     return StreamingResponse(
         stream_and_store_answer(
             chain,
-            {"previous": previous_turns, "context": context, "question": question},
+            {
+                "previous": previous_turns,
+                "context": context_clean,
+                "question": question,
+            },
             session_id,
-            question
+            question,
         ),
-        media_type="text/plain"
+        media_type="text/plain",
     )
 
 
@@ -279,7 +350,11 @@ async def get_history(session_id: str):
 @app.post("/new-conversation")
 async def new_conversation(input: SessionInput):
     await delete_conversation(input.session_id)
-    return {"status": "ok", "message": f"Conversation history cleared for session: {input.session_id}"}
+    return {
+        "status": "ok",
+        "message": f"Conversation history cleared for session: {input.session_id}",
+    }
+
 
 # Reset vector store
 @app.post("/reset-vector-store")
@@ -290,7 +365,7 @@ async def reset_vector_store():
         client.delete_collection("texts")
         logger.warning("Qdrant 'texts' collection deleted.")
 
-    create_qdrant_collection()
+    create_qdrant_collection(collection_name="texts", vector_size=768)
     logger.info("Qdrant 'texts' collection recreated.")
 
     return {"status": "ok", "message": "Vector store has been reset."}
@@ -301,6 +376,7 @@ async def reset_vector_store():
 async def list_sessions():
     keys = await redis_client.keys("*")
     return {"sessions": keys}
+
 
 # Load documents
 @app.post("/load-documents")
@@ -322,11 +398,11 @@ async def load_documents():
         return {"status": "no markdown files found"}
 
     # Text splitter
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1024, chunk_overlap=100)
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=2048, chunk_overlap=100)
     split_docs = text_splitter.split_documents(documents)
 
     # Qdrant collection creation
-    create_qdrant_collection()
+    create_qdrant_collection(collection_name="texts", vector_size=768)
 
     # Upload documents
     client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
@@ -341,8 +417,6 @@ async def load_documents():
         "status": "ok",
         "documents_loaded": len(documents),
         "chunks_uploaded": len(split_docs),
-        "sample_filename": documents[0].metadata['source'] if documents else "n/a",
-        "sample_content": documents[0].page_content[:200] if documents else "n/a"
+        "sample_filename": documents[0].metadata["source"] if documents else "n/a",
+        "sample_content": documents[0].page_content[:200] if documents else "n/a",
     }
-
-

@@ -64,7 +64,7 @@ async def stream_and_store_answer(
             content = str(chunk)  # Fallback (optional, safety net)
 
         full_answer += content
-        yield content  # ✅ Yield only the token delta
+        yield content  # Yield only the token delta
 
     # After streaming completes, store in Redis
     try:
